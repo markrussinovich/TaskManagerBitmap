@@ -65,6 +65,7 @@ int main( int argc, char* argv[] )
     BITMAP          bitmap;
     HBITMAP         hBitmap;
     COLORREF        pixel, greyPixel;
+    HANDLE          hThread = NULL;
 
     //
     // Width is the width of Task Manager's CPU activity array 
@@ -135,18 +136,26 @@ int main( int argc, char* argv[] )
 
                 InitializeProcThreadAttributeList( NULL, 1, 0, &attrListSize );
                 attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc( attrListSize );
-                InitializeProcThreadAttributeList( attrList, 1, 0, &attrListSize );
-                memset( &groupAffinity, 0, sizeof( groupAffinity ) );
-                groupAffinity.Group = numaRelationship->GroupMask.Group;
-                groupAffinity.Mask = (KAFFINITY)1 << cpu;
-                UpdateProcThreadAttribute( attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
-                    &groupAffinity, sizeof( groupAffinity ), NULL, NULL );
+                if (attrList)
+                {
+                    InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize);
+                    memset(&groupAffinity, 0, sizeof(groupAffinity));
+                    groupAffinity.Group = numaRelationship->GroupMask.Group;
+                    groupAffinity.Mask = (KAFFINITY)1 << cpu;
+                    UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
+                        &groupAffinity, sizeof(groupAffinity), NULL, NULL);
 
-                CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR) cpuNumber,
-                    0, attrList, NULL );
-                DeleteProcThreadAttributeList( attrList );
-                free( attrList );
-                cpuNumber++;
+                    hThread = CreateRemoteThreadEx(GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
+                        0, attrList, NULL);
+                    if (hThread)
+                    {
+                        CloseHandle(hThread);
+                        hThread = NULL;
+                    }
+                    DeleteProcThreadAttributeList(attrList);
+                    free(attrList);
+                    cpuNumber++;
+                }
             }
         }
         offset += curProcInfo->Size;

@@ -134,7 +134,8 @@ int main( int argc, char* argv[] )
     RECT            rcClient, rcBitmap;
     BOOL            scrollHorizontal;
     COLORREF        pixel, greyPixel;
-    HANDLE          hThread = NULL;
+    float           scaleFactor;
+    HANDLE          hThread;
 
     //
     // Width is the width of Task Manager's CPU activity array 
@@ -193,9 +194,9 @@ int main( int argc, char* argv[] )
         hOrigDC = GetDC( hWnd );
         GetClientRect( hWnd, &rcClient );
         if( width / rcClient.right )
-            scaleFactor = width / rcClient.right;
+            scaleFactor = (float) width / rcClient.right;
         else
-            scaleFactor = (maxCpus / width) / rcClient.bottom;
+            scaleFactor = (float) (maxCpus / width) / rcClient.bottom;
         rcBitmap.right = width;
         rcBitmap.bottom = maxCpus / width;
         hNewBitmap = CreateCompatibleBitmap( hOrigDC, rcBitmap.right, rcBitmap.bottom );
@@ -246,26 +247,24 @@ int main( int argc, char* argv[] )
 
                 InitializeProcThreadAttributeList( NULL, 1, 0, &attrListSize );
                 attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc( attrListSize );
-                if (attrList)
-                {
-                    InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize);
-                    memset(&groupAffinity, 0, sizeof(groupAffinity));
-                    groupAffinity.Group = numaRelationship->GroupMask.Group;
-                    groupAffinity.Mask = (KAFFINITY)1 << cpu;
-                    UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
-                        &groupAffinity, sizeof(groupAffinity), NULL, NULL);
+                InitializeProcThreadAttributeList( attrList, 1, 0, &attrListSize );
+                memset( &groupAffinity, 0, sizeof( groupAffinity ) );
+                groupAffinity.Group = numaRelationship->GroupMask.Group;
+                groupAffinity.Mask = (KAFFINITY)1 << cpu;
+                UpdateProcThreadAttribute( attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
+                    &groupAffinity, sizeof( groupAffinity ), NULL, NULL );
 
-                    hThread = CreateRemoteThreadEx(GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
-                        0, attrList, NULL);
-                    if (hThread)
-                    {
-                        CloseHandle(hThread);
-                        hThread = NULL;
-                    }
-                    DeleteProcThreadAttributeList(attrList);
-                    free(attrList);
-                    cpuNumber++;
+                hThread = CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
+                    0, attrList, NULL );
+                if( hThread )
+                {
+                    CloseHandle( hThread );
+                    hThread = NULL;
                 }
+                DeleteProcThreadAttributeList( attrList );
+                DeleteProcThreadAttributeList( attrList );
+                free( attrList );
+                cpuNumber++;
             }
         }
         offset += curProcInfo->Size;

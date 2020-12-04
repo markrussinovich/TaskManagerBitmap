@@ -14,7 +14,73 @@
 #include <processthreadsapi.h>
 #include <iostream>
 
+// Shades of grey
+#define GREYSCALE       8
 volatile DWORD* CpuPixels;
+
+
+typedef struct {
+    DWORD       ProcessId;
+    HWND        hWnd;
+} HWND_CONTEXT, * PHWND_CONTEXT;
+
+
+//--------------------------------------------------------------------------------
+//
+// IsMainWindow
+//
+// Is window parentless and visible. 
+//
+//--------------------------------------------------------------------------------
+BOOL IsMainWindow(
+    HWND handle
+)
+{
+    return GetWindow( handle, GW_OWNER ) == (HWND)0 && IsWindowVisible( handle );
+}
+
+
+//--------------------------------------------------------------------------------
+//
+// EnumWindowsCallback
+//
+// Scan windows of process looking for main one. 
+//
+//--------------------------------------------------------------------------------
+BOOL CALLBACK EnumWindowsCallback(
+    HWND handle,
+    LPARAM lParam
+)
+{
+    PHWND_CONTEXT   context = (PHWND_CONTEXT)lParam;
+    DWORD          processId = 0;
+
+    GetWindowThreadProcessId( handle, &processId );
+    if( context->ProcessId != processId || !IsMainWindow( handle ) )
+        return TRUE;
+    context->hWnd = handle;
+    return FALSE;
+}
+
+
+//--------------------------------------------------------------------------------
+//
+// FindMainWindow
+//
+// Enumerate windows. 
+//
+//--------------------------------------------------------------------------------
+HWND FindMainWindow(
+    DWORD ProcessId
+)
+{
+    HWND_CONTEXT context;
+
+    context.ProcessId = ProcessId;
+    context.hWnd = 0;
+    EnumWindows( EnumWindowsCallback, (LPARAM)&context );
+    return context.hWnd;
+}
 
 //--------------------------------------------------------------------------------
 //
@@ -34,9 +100,9 @@ DWORD WINAPI PixelCpuThread(
     while( 1 ) {
 
         startTick = GetTickCount();
-        while( GetTickCount() - startTick < CpuPixels[cpuNumber] * 25 );
+        while( GetTickCount() - startTick < CpuPixels[cpuNumber] * (100 / GREYSCALE) );
 
-        Sleep( 100 - CpuPixels[cpuNumber] * 25 );
+        Sleep( 100 - CpuPixels[cpuNumber] * (100 / GREYSCALE) );
     }
     return 0;
 }
@@ -60,11 +126,15 @@ int main( int argc, char* argv[] )
     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX logProcInfo, curProcInfo;
     PNUMA_NODE_RELATIONSHIP  numaRelationship;
     DWORD           cpuNumber = 0, maxCpus = 0;
-    int             width, x, y;
-    HDC             hScreenDC, hSrcDC;
+    int             width, x, y, processId, averageColor;
+    HDC             hScreenDC, hDstDC, hOrigDC;
+    HWND            hWnd = NULL;
     BITMAP          bitmap;
-    HBITMAP         hBitmap;
+    HBITMAP         hBitmap = NULL, hNewBitmap;
+    RECT            rcClient, rcBitmap;
+    BOOL            scrollHorizontal;
     COLORREF        pixel, greyPixel;
+    float           scaleFactor;
 
     //
     // Width is the width of Task Manager's CPU activity array 
@@ -74,7 +144,7 @@ int main( int argc, char* argv[] )
         printf( "Usage: %s <bitmap> <width>", argv[0] );
         return -1;
     }
-
+    processId = atoi( argv[1] );
     width = atoi( argv[2] );
 
     //
@@ -109,16 +179,57 @@ int main( int argc, char* argv[] )
     //
     // Load the bitmap
     //
-    hBitmap = (HBITMAP)LoadImageA( NULL, argv[1], IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE );
-    if( hBitmap == NULL ) {
-
-        printf( "Error loading %s: %d\n", argv[1], GetLastError() );
-        return -1;
-    }
-    GetObject( hBitmap, sizeof( BITMAP ), &bitmap );
     hScreenDC = GetDC( NULL );
-    hSrcDC = CreateCompatibleDC( hScreenDC );
-    SelectObject( hSrcDC, hBitmap );
+    hOrigDC = CreateCompatibleDC( hScreenDC );
+    hDstDC = CreateCompatibleDC( hOrigDC );
+
+    if( processId != 0 ) {
+
+        hWnd = FindMainWindow( processId );
+        if( hWnd == NULL ) {
+
+            printf( "Unable to find windows for process %d\n", processId );
+        }
+        hOrigDC = GetDC( hWnd );
+        GetClientRect( hWnd, &rcClient );
+        if( width / rcClient.right )
+            scaleFactor = width / rcClient.right;
+        else
+            scaleFactor = (maxCpus / width) / rcClient.bottom;
+        rcBitmap.right = width;
+        rcBitmap.bottom = maxCpus / width;
+        hNewBitmap = CreateCompatibleBitmap( hOrigDC, rcBitmap.right, rcBitmap.bottom );
+        SelectObject( hDstDC, hNewBitmap );
+        StretchBlt( hDstDC, 0, 0, rcBitmap.right, rcBitmap.bottom, hOrigDC, 0, 0, rcClient.right, rcClient.bottom, SRCCOPY );
+    }
+    else {
+        hBitmap = (HBITMAP)LoadImageA( NULL, argv[1], IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE );
+        if( hBitmap == NULL ) {
+
+            printf( "Error loading %s: %d\n", argv[1], GetLastError() );
+            return -1;
+        }
+        GetObject( hBitmap, sizeof( BITMAP ), &bitmap );
+        SelectObject( hOrigDC, hBitmap );
+
+        if( bitmap.bmWidth > bitmap.bmHeight ) {
+
+            scrollHorizontal = TRUE;
+            scaleFactor = (float)(maxCpus / width) / bitmap.bmHeight;
+        }
+        else {
+
+            scaleFactor = (float)width / bitmap.bmWidth;
+        }
+        rcBitmap.right = (int)((float)bitmap.bmWidth * scaleFactor);
+        rcBitmap.bottom = (int)(((float)bitmap.bmHeight) * scaleFactor);
+        hNewBitmap = CreateCompatibleBitmap( hOrigDC, rcBitmap.right, rcBitmap.bottom );
+        SelectObject( hDstDC, hNewBitmap );
+        SetStretchBltMode( hDstDC, COLORONCOLOR );
+        StretchBlt( hDstDC, 0, 0, rcBitmap.right, rcBitmap.bottom, hOrigDC, 0, 0,
+            bitmap.bmWidth, bitmap.bmHeight, SRCCOPY | CAPTUREBLT );
+        scrollHorizontal = bitmap.bmWidth > bitmap.bmHeight;
+    }
 
     //
     // Spawn a thread pinned to each CPU, identifying them by their CPU number index
@@ -142,7 +253,7 @@ int main( int argc, char* argv[] )
                 UpdateProcThreadAttribute( attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
                     &groupAffinity, sizeof( groupAffinity ), NULL, NULL );
 
-                CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR) cpuNumber,
+                CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
                     0, attrList, NULL );
                 DeleteProcThreadAttributeList( attrList );
                 free( attrList );
@@ -157,21 +268,38 @@ int main( int argc, char* argv[] )
     // Loop the bitmap through the CPU activity array either horizontally or vertically
     // depending on dimensions of bitmap
     //
+    offset = 0;
     while( TRUE ) {
         for( y = 0; y < (int)maxCpus / width; y++ ) {
-
+#if _DEBUG
+            printf( "\n[%d] ", y );
+#endif
             for( x = 0; x < width; x++ ) {
-                if( bitmap.bmWidth > bitmap.bmHeight )
-                    pixel = GetPixel( hSrcDC, (x + offset) % bitmap.bmWidth, y );
-                else
-                    pixel = GetPixel( hSrcDC, x, (y - offset) % bitmap.bmHeight );
-                //printf("%06x ", pixel);
-                greyPixel = RGB( GetRValue( pixel ), GetRValue( pixel ), GetRValue( pixel ) );
-                CpuPixels[y * width + x] = 4 - greyPixel / (0xffffff / 4);
+                if( hBitmap ) {
+                    if( scrollHorizontal )
+                        pixel = GetPixel( hDstDC, (x + offset) % rcBitmap.right, y );
+                    else
+                        pixel = GetPixel( hDstDC, x, (y - offset) % rcBitmap.bottom );
+                }
+                else {
+
+                    pixel = GetPixel( hDstDC, x, y );
+                }
+                averageColor = (GetRValue( pixel ) + GetGValue( pixel ) + GetBValue( pixel )) / 3;
+                greyPixel = RGB( averageColor, averageColor, averageColor );
+                CpuPixels[y * width + x] = GREYSCALE - greyPixel / (0xffffff / GREYSCALE);
+#if _DEBUG
+                printf( "%d ", CpuPixels[y * width + x] );
+#endif
             }
-            //printf("\n");
         }
-        offset++;
         Sleep( 500 );
+        if( processId ) {
+
+            StretchBlt( hDstDC, 0, 0, width, maxCpus / width, hOrigDC, 0, 0, rcClient.right, rcClient.bottom, SRCCOPY );
+        }
+        else {
+            offset++;
+        }
     }
 }

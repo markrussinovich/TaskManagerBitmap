@@ -94,17 +94,86 @@ DWORD WINAPI PixelCpuThread(
     _In_ LPVOID lpParameter
 )
 {
-    DWORD   cpuNumber = (DWORD)(DWORD_PTR)lpParameter;
-    DWORD   startTick;
+    DWORD       cpuNumber = (DWORD)(DWORD_PTR)lpParameter;
+    ULONGLONG   startTick;
 
     while( 1 ) {
 
-        startTick = GetTickCount();
-        while( GetTickCount() - startTick < CpuPixels[cpuNumber] * (100 / GREYSCALE) );
+        startTick = GetTickCount64();
+        while( GetTickCount64() - startTick < CpuPixels[cpuNumber] * (100 / GREYSCALE) );
 
         Sleep( 100 - CpuPixels[cpuNumber] * (100 / GREYSCALE) );
     }
     return 0;
+}
+
+
+
+//--------------------------------------------------------------------------------
+//
+// LaunchBitmapThreads
+//
+// Launch a thread pinned to each CPU on the system, following the ordering
+// used by Task Manager's CPU view. 
+//
+//--------------------------------------------------------------------------------
+DWORD
+LaunchBitmapThreads(
+    volatile DWORD** CpuPixels
+)
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX curProcInfo, logProcInfo;
+    PNUMA_NODE_RELATIONSHIP  numaRelationship;
+    DWORD           offset, cpuNumber = 0;
+    GROUP_AFFINITY  groupAffinity;
+    LPPROC_THREAD_ATTRIBUTE_LIST    attrList;
+    SIZE_T          attrListSize = 0;
+    HANDLE          hThread;
+    DWORD           returnLength = 0;
+    ULONG_PTR       cpu;
+
+    GetLogicalProcessorInformationEx( RelationNumaNode, NULL, &returnLength );
+    logProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)malloc( returnLength );
+    GetLogicalProcessorInformationEx( RelationNumaNode, logProcInfo, &returnLength );
+
+    *CpuPixels = 0;
+    curProcInfo = logProcInfo;
+    offset = 0;
+    while( offset < returnLength ) {
+
+        numaRelationship = &curProcInfo->NumaNode;
+        for( cpu = 0; cpu < sizeof( numaRelationship->GroupMask.Mask ) * 8; cpu++ ) {
+
+            if( (1ULL << cpu) & numaRelationship->GroupMask.Mask ) {
+
+                *CpuPixels = (DWORD*)realloc( (PVOID)*CpuPixels, (cpuNumber + 1) * sizeof( DWORD ) );
+                memset( (PVOID)*CpuPixels, 0, (cpuNumber + 1) * sizeof( DWORD ) );
+
+                InitializeProcThreadAttributeList( NULL, 1, 0, &attrListSize );
+                attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc( attrListSize );
+                InitializeProcThreadAttributeList( attrList, 1, 0, &attrListSize );
+                memset( &groupAffinity, 0, sizeof( groupAffinity ) );
+                groupAffinity.Group = numaRelationship->GroupMask.Group;
+                groupAffinity.Mask = (KAFFINITY)1 << cpu;
+                UpdateProcThreadAttribute( attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
+                    &groupAffinity, sizeof( groupAffinity ), NULL, NULL );
+
+                hThread = CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
+                    0, attrList, NULL );
+                if( hThread )
+                {
+                    CloseHandle( hThread );
+                    hThread = NULL;
+                }
+                DeleteProcThreadAttributeList( attrList );
+                free( attrList );
+                cpuNumber++;
+            }
+        }
+        offset += curProcInfo->Size;
+        curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)curProcInfo + curProcInfo->Size);
+    }
+    return cpuNumber;
 }
 
 
@@ -118,14 +187,8 @@ DWORD WINAPI PixelCpuThread(
 //--------------------------------------------------------------------------------
 int main( int argc, char* argv[] )
 {
-    ULONG_PTR       cpu;
-    LPPROC_THREAD_ATTRIBUTE_LIST    attrList;
-    SIZE_T          attrListSize;
-    DWORD           offset, returnLength = 0;
-    GROUP_AFFINITY  groupAffinity;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX logProcInfo, curProcInfo;
-    PNUMA_NODE_RELATIONSHIP  numaRelationship;
-    DWORD           cpuNumber = 0, maxCpus = 0;
+    DWORD           offset;
+    DWORD           maxCpus;
     int             width, x, y, processId, averageColor;
     HDC             hScreenDC, hDstDC, hOrigDC;
     HWND            hWnd = NULL;
@@ -135,7 +198,6 @@ int main( int argc, char* argv[] )
     BOOL            scrollHorizontal;
     COLORREF        pixel, greyPixel;
     float           scaleFactor;
-    HANDLE          hThread;
 
     //
     // Width is the width of Task Manager's CPU activity array 
@@ -148,34 +210,12 @@ int main( int argc, char* argv[] )
     processId = atoi( argv[1] );
     width = atoi( argv[2] );
 
-    //
-    // First, get active CPU count
-    //
-    GetLogicalProcessorInformationEx( RelationNumaNode, NULL, &returnLength );
-    logProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)malloc( returnLength );
-    GetLogicalProcessorInformationEx( RelationNumaNode, logProcInfo, &returnLength );
-    offset = 0;
-    while( offset < returnLength ) {
-
-        curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)logProcInfo + offset);
-        numaRelationship = &curProcInfo->NumaNode;
-        //printf("%d: %llx\n", numaRelationship->NodeNumber, (DWORD64) numaRelationship->GroupMask.Mask);
-        for( cpu = 0; cpu < sizeof( numaRelationship->GroupMask.Mask ) * 8; cpu++ ) {
-
-            if( (1ULL << cpu) & numaRelationship->GroupMask.Mask ) {
-
-                maxCpus++;
-            }
-        }
-        offset += curProcInfo->Size;
-    }
 
     //
-    // Allocate CPU activity array. We'll use a scale of 0-4 (4 being 100% or black)
-    // for the cell values
+    // Spawn a thread pinned to each CPU, identifying them by their CPU number index
+    // into the CPU array. Task manager shows CPUs ordered by their NUMA node. 
     //
-    CpuPixels = (DWORD*)malloc( maxCpus * sizeof( DWORD ) );
-    memset( (PVOID)CpuPixels, 0, maxCpus * sizeof( DWORD ) );
+    maxCpus = LaunchBitmapThreads( &CpuPixels );
 
     //
     // Load the bitmap
@@ -194,9 +234,9 @@ int main( int argc, char* argv[] )
         hOrigDC = GetDC( hWnd );
         GetClientRect( hWnd, &rcClient );
         if( width / rcClient.right )
-            scaleFactor = (float) width / rcClient.right;
+            scaleFactor = (float)width / rcClient.right;
         else
-            scaleFactor = (float) (maxCpus / width) / rcClient.bottom;
+            scaleFactor = (float)(maxCpus / width) / rcClient.bottom;
         rcBitmap.right = width;
         rcBitmap.bottom = maxCpus / width;
         hNewBitmap = CreateCompatibleBitmap( hOrigDC, rcBitmap.right, rcBitmap.bottom );
@@ -230,45 +270,6 @@ int main( int argc, char* argv[] )
         StretchBlt( hDstDC, 0, 0, rcBitmap.right, rcBitmap.bottom, hOrigDC, 0, 0,
             bitmap.bmWidth, bitmap.bmHeight, SRCCOPY | CAPTUREBLT );
         scrollHorizontal = bitmap.bmWidth > bitmap.bmHeight;
-    }
-
-    //
-    // Spawn a thread pinned to each CPU, identifying them by their CPU number index
-    // into the CPU array. Task manager shows CPUs ordered by their NUMA node. 
-    //
-    curProcInfo = logProcInfo;
-    offset = 0;
-    while( offset < returnLength ) {
-
-        numaRelationship = &curProcInfo->NumaNode;
-        for( cpu = 0; cpu < sizeof( numaRelationship->GroupMask.Mask ) * 8; cpu++ ) {
-
-            if( (1ULL << cpu) & numaRelationship->GroupMask.Mask ) {
-
-                InitializeProcThreadAttributeList( NULL, 1, 0, &attrListSize );
-                attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc( attrListSize );
-                InitializeProcThreadAttributeList( attrList, 1, 0, &attrListSize );
-                memset( &groupAffinity, 0, sizeof( groupAffinity ) );
-                groupAffinity.Group = numaRelationship->GroupMask.Group;
-                groupAffinity.Mask = (KAFFINITY)1 << cpu;
-                UpdateProcThreadAttribute( attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
-                    &groupAffinity, sizeof( groupAffinity ), NULL, NULL );
-
-                hThread = CreateRemoteThreadEx( GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
-                    0, attrList, NULL );
-                if( hThread )
-                {
-                    CloseHandle( hThread );
-                    hThread = NULL;
-                }
-                DeleteProcThreadAttributeList( attrList );
-                DeleteProcThreadAttributeList( attrList );
-                free( attrList );
-                cpuNumber++;
-            }
-        }
-        offset += curProcInfo->Size;
-        curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)curProcInfo + curProcInfo->Size);
     }
 
     //

@@ -122,58 +122,79 @@ LaunchBitmapThreads(
 	volatile DWORD** CpuPixels
 )
 {
-	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX curProcInfo, logProcInfo;
-	PNUMA_NODE_RELATIONSHIP  numaRelationship;
-	DWORD           offset, cpuNumber = 0;
+	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX curProcInfo;
+	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX logGroupProcInfo;
+	DWORD           offset = 0;
 	GROUP_AFFINITY  groupAffinity;
 	LPPROC_THREAD_ATTRIBUTE_LIST    attrList;
 	SIZE_T          attrListSize = 0;
 	HANDLE          hThread;
 	DWORD           returnLength = 0;
-	ULONG_PTR       cpu;
+	ULONG_PTR       cpu, cpuNumber;
+	PPROCESSOR_RELATIONSHIP      groupRelationship;
 
-	GetLogicalProcessorInformationEx(RelationNumaNode, NULL, &returnLength);
-	logProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)malloc(returnLength);
-	GetLogicalProcessorInformationEx(RelationNumaNode, logProcInfo, &returnLength);
+	//
+
+	GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &returnLength);
+	logGroupProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)malloc(returnLength);
+	GetLogicalProcessorInformationEx(RelationProcessorCore, logGroupProcInfo, &returnLength);
+	offset = 0;
+	int maxCpus = 0;
+	int maxGroups = -1;
+	static int groupsAll[100];
+	int groupCurrent = -1;
+	while (offset < returnLength) {
+		curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)logGroupProcInfo + offset);
+		groupRelationship = &curProcInfo->Processor;
+		groupCurrent = (int)groupRelationship->GroupMask->Group;
+		if (maxGroups < groupCurrent) {
+			maxGroups = groupCurrent;
+			groupsAll[groupCurrent] = 0;
+		}
+		groupsAll[groupCurrent]++;
+		offset += curProcInfo->Size;
+		maxCpus++;
+	}
+
+	printf("Cores found: %d. Processor Groups found: %d.\n", maxCpus, maxGroups);
+	for (int i = 0; i <= maxGroups; i++) {
+		printf("Processor Group %d has %d cores.\n", i, groupsAll[i]);
+	}
 
 	*CpuPixels = 0;
-	curProcInfo = logProcInfo;
-	offset = 0;
-	while (offset < returnLength) {
+	curProcInfo = logGroupProcInfo;
+	cpuNumber = 0;
 
-		numaRelationship = &curProcInfo->NumaNode;
-		for (cpu = 0; cpu < sizeof(numaRelationship->GroupMask.Mask) * 8; cpu++) {
+	for (int i = 0; i <= maxGroups; i++) {
+		for (cpu = 0; cpu < groupsAll[i]; cpu++) {
+			*CpuPixels = (DWORD*)realloc((PVOID)*CpuPixels, (cpuNumber + 1) * sizeof(DWORD));
+			memset((PVOID)*CpuPixels, 0, (cpuNumber + 1) * sizeof(DWORD));
 
-			if ((1ULL << cpu) & numaRelationship->GroupMask.Mask) {
+			InitializeProcThreadAttributeList(NULL, 1, 0, &attrListSize);
+			attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrListSize);
+			InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize);
+			memset(&groupAffinity, 0, sizeof(groupAffinity));
+			groupAffinity.Group = i;
+			groupAffinity.Mask = (KAFFINITY)1 << cpu;
+			UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
+				&groupAffinity, sizeof(groupAffinity), NULL, NULL);
 
-				*CpuPixels = (DWORD*)realloc((PVOID)*CpuPixels, (cpuNumber + 1) * sizeof(DWORD));
-				memset((PVOID)*CpuPixels, 0, (cpuNumber + 1) * sizeof(DWORD));
-
-				InitializeProcThreadAttributeList(NULL, 1, 0, &attrListSize);
-				attrList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrListSize);
-				InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize);
-				memset(&groupAffinity, 0, sizeof(groupAffinity));
-				groupAffinity.Group = numaRelationship->GroupMask.Group;
-				groupAffinity.Mask = (KAFFINITY)1 << cpu;
-				UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
-					&groupAffinity, sizeof(groupAffinity), NULL, NULL);
-
-				hThread = CreateRemoteThreadEx(GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
-					0, attrList, NULL);
-				if (hThread)
-				{
-					CloseHandle(hThread);
-					hThread = NULL;
-				}
-				DeleteProcThreadAttributeList(attrList);
-				free(attrList);
-				cpuNumber++;
+			hThread = CreateRemoteThreadEx(GetCurrentProcess(), 0, 0, PixelCpuThread, (PVOID)(DWORD_PTR)cpuNumber,
+				0, attrList, NULL);
+			if (hThread)
+			{
+				CloseHandle(hThread);
+				hThread = NULL;
 			}
+			DeleteProcThreadAttributeList(attrList);
+			free(attrList);
+			cpuNumber++;
 		}
-		offset += curProcInfo->Size;
-		curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)curProcInfo + curProcInfo->Size);
 	}
-	return 160;
+
+	offset += curProcInfo->Size;
+	curProcInfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)((DWORD_PTR)curProcInfo + curProcInfo->Size);
+	return (DWORD)maxCpus;
 }
 
 

@@ -151,12 +151,13 @@ LaunchBitmapThreads(
 			maxGroups = groupCurrent;
 			groupsAll[groupCurrent] = 0;
 		}
-		groupsAll[groupCurrent]++;
+		printf("Core is hyper-threaded: %d\n", groupRelationship->Flags);
 		offset += curProcInfo->Size;
-		maxCpus++;
+		groupsAll[groupCurrent] = groupsAll[groupCurrent] + groupRelationship->Flags + 1;
+		maxCpus = maxCpus + groupRelationship->Flags + 1;
 	}
 
-	printf("Cores found: %d. Processor Groups found: %d.\n", maxCpus, maxGroups);
+	printf("Cores found: %d. Processor Groups found: %d.\n", maxCpus, maxGroups + 1);
 	for (int i = 0; i <= maxGroups; i++) {
 		printf("Processor Group %d has %d cores.\n", i, groupsAll[i]);
 	}
